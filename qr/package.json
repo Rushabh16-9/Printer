@@ -1,0 +1,12 @@
+{
+  "name": "printer-by-scanner-qr",
+  "version": "1.0.0",
+  "description": "QR code generator for Printer by Scanner",
+  "main": "generate-qr.js",
+  "scripts": {
+    "generate": "node generate-qr.js"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.3"
+  }
+}
