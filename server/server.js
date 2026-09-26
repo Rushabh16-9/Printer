@@ -72,17 +72,27 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
 });
 
 app.post("/api/print-job", express.json(), async (req, res) => {
-  const { fileId, originalName, copies = 1, color = true } = req.body;
+  const { fileId, originalName, copies = 1, color = true, shopId } = req.body;
   if (!fileId) return res.status(400).json({ success: false, error: "No fileId provided" });
 
   const stored = fileStore.get(fileId);
   if (!stored) return res.status(404).json({ success: false, error: "File not found or expired. Please re-upload." });
 
   if (agents.size === 0) {
-    return res.status(503).json({ success: false, error: "No printer agent connected. Make sure the print agent is running on the printing PC." });
+    return res.status(503).json({ success: false, error: "No printer connected right now. Please tell the shop owner." });
   }
 
-  const [agentId, agentInfo] = [...agents.entries()][0];
+  // Find the agent by shopId (matching agent.name or agent.id)
+  let agentInfo;
+  if (shopId) {
+    agentInfo = [...agents.values()].find(a => a.name.toLowerCase() === shopId.toLowerCase() || a.id === shopId);
+  }
+  
+  // Fallback: if no shopId provided or not found, use the first connected printer
+  if (!agentInfo) {
+    agentInfo = [...agents.values()][0];
+  }
+  const agentId = agentInfo.id;
   const agentSocket = io.sockets.sockets.get(agentInfo.socketId);
 
   if (!agentSocket) {
@@ -140,7 +150,9 @@ app.post("/api/cancel", express.json(), async (req, res) => {
     return res.status(503).json({ success: false, error: "No agent connected" });
   }
 
-  const [agentId, agentInfo] = [...agents.entries()][0];
+  const { shopId } = req.body;
+  let agentInfo = shopId ? [...agents.values()].find(a => a.name.toLowerCase() === shopId.toLowerCase() || a.id === shopId) : [...agents.values()][0];
+  if (!agentInfo) agentInfo = [...agents.values()][0];
   const agentSocket = io.sockets.sockets.get(agentInfo.socketId);
 
   if (!agentSocket) {
@@ -390,7 +402,9 @@ const HTML = `<!DOCTYPE html>
   dropZone.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remove('over');const f=e.dataTransfer.files[0];if(f)handleFile(f);});
   fileInput.addEventListener('change',e=>{const f=e.target.files[0];if(f)handleFile(f);e.target.value='';});
   rmBtn.addEventListener('click',reset);
-  printBtn.addEventListener('click',async function(){if(!fileReady||!window._uploadedFileId)return;printBtn.disabled=true;showStatus('Sending to printer...','loading');setStep(3);try{const res=await fetch('/api/print-job',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fileId:window._uploadedFileId,originalName:currentFile.name,copies:parseInt(copiesIn.value)||1,color:isColourSelected})});const data=await res.json();if(data.success){showStatus(data.message||'Your file has been sent to the printer!','success');s1.className='step done';s2.className='step done';s3.className='step done';setTimeout(reset,8000);}else{throw new Error(data.error||'Unknown error');}}catch(err){showStatus('Print error: '+err.message,'error');printBtn.disabled=false;setStep(2);}});
+  printBtn.addEventListener('click',async function(){if(!fileReady||!window._uploadedFileId)return;printBtn.disabled=true;showStatus('Sending to printer...','loading');setStep(3);try{const urlParams = new URLSearchParams(window.location.search); const shopId = urlParams.get('shop') || '';
+const reqBody = {fileId:window._uploadedFileId,originalName:currentFile.name,copies:parseInt(copiesIn.value)||1,color:isColourSelected, shopId};
+const res=await fetch('/api/print-job',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(reqBody)});const data=await res.json();if(data.success){showStatus(data.message||'Your file has been sent to the printer!','success');s1.className='step done';s2.className='step done';s3.className='step done';setTimeout(reset,8000);}else{throw new Error(data.error||'Unknown error');}}catch(err){showStatus('Print error: '+err.message,'error');printBtn.disabled=false;setStep(2);}});
 })();
 </script>
 </body>
