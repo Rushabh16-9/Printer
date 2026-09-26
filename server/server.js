@@ -28,6 +28,7 @@ const AGENT_SECRET = process.env.AGENT_SECRET || null;
 
 // --- In-memory file store -----------------------------------------------------
 const fileStore = new Map();
+const pendingJobs = new Map();
 
 setInterval(() => {
   const tenMin = 10 * 60 * 1000;
@@ -109,8 +110,16 @@ app.post("/api/print-job", express.json(), async (req, res) => {
 
   const result = await new Promise((resolve) => {
     const timeout = setTimeout(() => {
+      pendingJobs.delete(fileId);
       resolve({ success: false, message: "Print agent timed out (60s). Check the agent is running." });
     }, 60000);
+
+    // Save the resolve function so the socket can call it
+    pendingJobs.set(fileId, (data) => {
+      clearTimeout(timeout);
+      pendingJobs.delete(fileId);
+      resolve(data);
+    });
 
     agentSocket.emit("print:execute", {
       fileId,
@@ -118,12 +127,6 @@ app.post("/api/print-job", express.json(), async (req, res) => {
       fileBase64,
       copies: numCopies,
       color: isColor,
-    });
-
-    // Listen for result on this specific socket
-    io.once("print:result:" + fileId, (data) => {
-      clearTimeout(timeout);
-      resolve(data);
     });
   });
 
@@ -198,8 +201,12 @@ io.on("connection", (socket) => {
 
   socket.on("print:result", (data) => {
     const { fileId } = data;
-    io.emit("print:result:" + fileId, data);
     console.log('[WS] Print result for "' + data.originalName + '": ' + (data.success ? "OK" : "FAIL") + " " + data.message);
+    
+    // Resolve the HTTP request waiting for this job
+    if (pendingJobs.has(fileId)) {
+      pendingJobs.get(fileId)(data);
+    }
   });
 
   // Relay cancel request from REST to the agent
