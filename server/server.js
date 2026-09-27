@@ -406,18 +406,18 @@ const HTML = `<!DOCTYPE html>
 
       if (foundAgent) {
         agentDot.className = 'agent-dot online';
-        agentLabel.textContent = '🟢 Printer ready — ' + foundAgent.name;
+        agentLabel.textContent = 'Printer ready — ' + foundAgent.name;
       } else {
         agentDot.className = 'agent-dot offline';
         if (targetShop) {
-          agentLabel.textContent = '🔴 Printer offline: ' + targetShop;
+          agentLabel.textContent = 'Printer offline: ' + targetShop;
         } else {
-          agentLabel.textContent = '🔴 No printer connected. Scan a shop QR code.';
+          agentLabel.textContent = 'No printer connected. Scan a shop QR code.';
         }
       }
     } catch (_) {
       agentDot.className = 'agent-dot offline';
-      agentLabel.textContent = '🔴 Cannot reach server.';
+      agentLabel.textContent = 'Cannot reach server.';
     }
   }
   checkAgentStatus();setInterval(checkAgentStatus,10000);
