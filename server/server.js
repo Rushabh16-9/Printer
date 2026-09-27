@@ -1,4 +1,4 @@
-﻿/**
+/**
  * PrintScan — Cloud Relay Server
  *
  * Runs on Railway (or any Node.js cloud host).
@@ -390,7 +390,36 @@ const HTML = `<!DOCTYPE html>
     s1=document.getElementById('s1'),s2=document.getElementById('s2'),s3=document.getElementById('s3'),
     btnColorYes=document.getElementById('btn-color-yes'),btnColorNo=document.getElementById('btn-color-no');
   let currentFile=null,fileReady=false,isColourSelected=true;
-  async function checkAgentStatus(){try{const r=await fetch('/api/agents'),d=await r.json();if(d.agents&&d.agents.length>0){agentDot.className='agent-dot online';agentLabel.textContent='???  Printer ready — '+d.agents[0].name;}else{agentDot.className='agent-dot offline';agentLabel.textContent='??  No printer connected. Start the agent on the printing PC.';}}catch(_){agentDot.className='agent-dot offline';agentLabel.textContent='??  Cannot reach server.';}}
+  async function checkAgentStatus(){
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const targetShop = urlParams.get('shop');
+      const r = await fetch('/api/agents');
+      const d = await r.json();
+      
+      let foundAgent = null;
+      if (targetShop) {
+        foundAgent = d.agents.find(a => a.name === targetShop);
+      } else if (d.agents && d.agents.length > 0) {
+        foundAgent = d.agents[0]; // fallback
+      }
+
+      if (foundAgent) {
+        agentDot.className = 'agent-dot online';
+        agentLabel.textContent = '🟢 Printer ready — ' + foundAgent.name;
+      } else {
+        agentDot.className = 'agent-dot offline';
+        if (targetShop) {
+          agentLabel.textContent = '🔴 Printer offline: ' + targetShop;
+        } else {
+          agentLabel.textContent = '🔴 No printer connected. Scan a shop QR code.';
+        }
+      }
+    } catch (_) {
+      agentDot.className = 'agent-dot offline';
+      agentLabel.textContent = '🔴 Cannot reach server.';
+    }
+  }
   checkAgentStatus();setInterval(checkAgentStatus,10000);
   btnColorYes.addEventListener('click',function(){isColourSelected=true;btnColorYes.classList.add('active');btnColorYes.setAttribute('aria-pressed','true');btnColorNo.classList.remove('active');btnColorNo.setAttribute('aria-pressed','false');});
   btnColorNo.addEventListener('click',function(){isColourSelected=false;btnColorNo.classList.add('active');btnColorNo.setAttribute('aria-pressed','true');btnColorYes.classList.remove('active');btnColorYes.setAttribute('aria-pressed','false');});
