@@ -1,28 +1,44 @@
-﻿const { io } = require('socket.io-client');
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
-const { v4: uuidv4 } = require('uuid');
+﻿/**
+ * PrintScan — Android Tablet/Phone Agent (Production)
+ *
+ * PRINTER_MODE=wifi  -> prints via IPP to any Wi-Fi printer
+ * PRINTER_MODE=usb   -> prints via USB OTG using Termux:API
+ *
+ * Required .env:
+ *   SERVER_URL    = https://your-app.up.railway.app
+ *   AGENT_SECRET  = your-secret-here
+ *   AGENT_NAME    = shop-1
+ *   PRINTER_MODE  = wifi   (or usb)
+ *   PRINTER_URL   = http://192.168.1.50:631/ipp/print  (wifi only)
+ */
 
-// --- Load .env ---
+const { io }   = require('socket.io-client');
+const os       = require('os');
+const path     = require('path');
+const fs       = require('fs');
+const { exec } = require('child_process');
+const { v4: uuidv4 } = require('uuid');
+const ipp      = require('ipp');
+
+// Load .env
 const envPath = path.join(__dirname, '.env');
 if (fs.existsSync(envPath)) {
-  const lines = fs.readFileSync(envPath, 'utf8').split('\n');
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    const val = trimmed.slice(eqIdx + 1).trim();
-    if (!process.env[key]) process.env[key] = val;
+  for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const eq = t.indexOf('=');
+    if (eq === -1) continue;
+    const k = t.slice(0, eq).trim();
+    const v = t.slice(eq + 1).trim();
+    if (!process.env[k]) process.env[k] = v;
   }
 }
 
-// --- CONFIG ---
 const SERVER_URL   = process.env.SERVER_URL   || 'http://localhost:4000';
 const AGENT_SECRET = process.env.AGENT_SECRET || null;
 const AGENT_NAME   = process.env.AGENT_NAME   || os.hostname();
+const PRINTER_MODE = (process.env.PRINTER_MODE || 'wifi').toLowerCase();
+const PRINTER_URL  = process.env.PRINTER_URL  || null;
 
 const ID_FILE = path.join(__dirname, '.agent-id');
 let AGENT_ID;
@@ -33,44 +49,147 @@ if (fs.existsSync(ID_FILE)) {
   fs.writeFileSync(ID_FILE, AGENT_ID);
 }
 
+const TEMP_DIR = path.join(__dirname, 'temp');
+if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+
+const LOG_DIR = path.join(__dirname, 'logs');
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+
 function log(msg) {
-  console.log('[' + new Date().toLocaleTimeString() + '] ' + msg);
+  const line = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+  console.log(line);
+  try { fs.appendFileSync(path.join(LOG_DIR, 'agent.log'), line + '\n'); } catch(_) {}
 }
 
-log('Starting Tablet/Phone Agent...');
-log('Connecting to: ' + SERVER_URL);
+async function imageToPdfBuffer(imgBuf, ext) {
+  const { PDFDocument } = require('pdf-lib');
+  const doc = await PDFDocument.create();
+  const image = ext === '.png' ? await doc.embedPng(imgBuf) : await doc.embedJpg(imgBuf);
+  const page = doc.addPage([image.width, image.height]);
+  page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
+  return Buffer.from(await doc.save());
+}
+
+async function prepareBuffer(buf, name) {
+  const ext = path.extname(name).toLowerCase();
+  if (['.jpg', '.jpeg', '.png'].includes(ext)) {
+    log('   Converting image to PDF...');
+    return { buf: await imageToPdfBuffer(buf, ext), mime: 'application/pdf' };
+  }
+  return { buf, mime: ext === '.pdf' ? 'application/pdf' : 'application/octet-stream' };
+}
+
+async function printWifi(buf, name, copies, isColor) {
+  if (!PRINTER_URL) throw new Error('PRINTER_URL not set in .env');
+  const { buf: data, mime } = await prepareBuffer(buf, name);
+  const printer = ipp.Printer(PRINTER_URL);
+  return new Promise((resolve, reject) => {
+    printer.execute('Print-Job', {
+      'operation-attributes-tag': {
+        'requesting-user-name': 'PrintScan',
+        'job-name': name,
+        'document-format': mime,
+      },
+      'job-attributes-tag': {
+        'copies': Math.min(parseInt(copies) || 1, 20),
+        'print-color-mode': isColor ? 'color' : 'monochrome',
+      },
+      data,
+    }, (err, res) => {
+      if (err) return reject(new Error('IPP error: ' + err.message));
+      if (res && res.statusCode && !res.statusCode.startsWith('successful'))
+        return reject(new Error('Printer rejected: ' + res.statusCode));
+      resolve('Printed via Wi-Fi IPP (' + (isColor ? 'Colour' : 'B&W') + ')');
+    });
+  });
+}
+
+async function printUSB(buf, name, copies) {
+  const { buf: data } = await prepareBuffer(buf, name);
+  const tmpPath = path.join(TEMP_DIR, 'usb_' + Date.now() + '.pdf');
+  fs.writeFileSync(tmpPath, data);
+  const numCopies = Math.min(parseInt(copies) || 1, 20);
+  return new Promise((resolve, reject) => {
+    exec('termux-usb -l', { timeout: 10000 }, (err, stdout) => {
+      if (err) {
+        try { fs.unlinkSync(tmpPath); } catch(_) {}
+        return reject(new Error('Termux:API not installed. Install from F-Droid.'));
+      }
+      let devices = [];
+      try { devices = JSON.parse(stdout.trim()); } catch(_) {}
+      if (!devices.length) {
+        try { fs.unlinkSync(tmpPath); } catch(_) {}
+        return reject(new Error('No USB printer found. Connect via OTG cable.'));
+      }
+      const device = devices[0];
+      log('   USB device: ' + device);
+      const cmd = 'termux-usb -r "' + device + '" -e "sh -c \'for i in $(seq 1 ' + numCopies + '); do cat ' + tmpPath + ' > /proc/self/fd/$TERMUX_USB_FD; done\'"';
+      exec(cmd, { timeout: 120000 }, (err2, _, stderr2) => {
+        try { fs.unlinkSync(tmpPath); } catch(_) {}
+        if (err2) return reject(new Error('USB print failed: ' + (stderr2 || err2.message)));
+        resolve('Printed via USB OTG (' + numCopies + ' copies)');
+      });
+    });
+  });
+}
+
+async function print(buf, name, copies, isColor) {
+  return PRINTER_MODE === 'usb'
+    ? await printUSB(buf, name, copies)
+    : await printWifi(buf, name, copies, isColor);
+}
+
+log('PrintScan Agent starting...');
+log('Shop : ' + AGENT_NAME + ' | Mode: ' + PRINTER_MODE.toUpperCase());
+log('Cloud: ' + SERVER_URL);
 
 const socket = io(SERVER_URL, {
   reconnection: true,
   reconnectionDelay: 3000,
+  reconnectionAttempts: Infinity,
 });
 
 socket.on('connect', () => {
-  log('Connected to cloud! Registering as: ' + AGENT_NAME);
+  log('Connected! Registering as: ' + AGENT_NAME);
   socket.emit('agent:register', {
-    id: AGENT_ID,
-    name: AGENT_NAME,
-    secret: AGENT_SECRET,
-    printerName: 'Mobile Phone Test'
+    id:          AGENT_ID,
+    name:        AGENT_NAME,
+    secret:      AGENT_SECRET,
+    printerName: PRINTER_MODE === 'usb' ? 'USB Printer (OTG)' : (PRINTER_URL || 'Wi-Fi (not configured)'),
   });
 });
 
-socket.on('agent:registered', () => {
-  log('Registered successfully! Ready to receive test print jobs...');
+socket.on('agent:registered', () => log('Ready! Waiting for print jobs...'));
+
+socket.on('agent:rejected', (data) => {
+  log('ERROR: Rejected — ' + data.reason);
+  process.exit(1);
 });
 
 socket.on('print:execute', async (data) => {
-  const { fileId, originalName, copies } = data;
-  log('\n>>> RECEIVED PRINT JOB: "' + originalName + '" | Copies: ' + copies);
-  log('    (Since this is a test on a phone, we are not actually printing it to a physical printer)');
-  
-  setTimeout(() => {
-    log('    Sending success message back to server...');
-    socket.emit('print:result', { 
-      fileId, originalName, success: true, 
-      message: 'Test printed successfully on mobile phone!' 
-    });
-  }, 2000);
+  const { fileId, originalName, fileBase64, copies, color = true } = data;
+  const isColor = color !== false && color !== 'false';
+  const numCopies = Math.min(parseInt(copies) || 1, 20);
+  log('\n--- Print Job ---');
+  log('File   : ' + originalName);
+  log('Copies : ' + numCopies + ' | Colour: ' + (isColor ? 'Yes' : 'No (B&W)'));
+  const tmpPath = path.join(TEMP_DIR, uuidv4() + '-' + originalName);
+  let tmpWritten = false;
+  try {
+    const buf = Buffer.from(fileBase64, 'base64');
+    fs.writeFileSync(tmpPath, buf);
+    tmpWritten = true;
+    const message = await print(buf, originalName, numCopies, isColor);
+    log('SUCCESS: ' + message);
+    socket.emit('print:result', { fileId, originalName, success: true, message });
+  } catch (err) {
+    log('FAILED : ' + err.message);
+    socket.emit('print:result', { fileId, originalName, success: false, message: 'Print error: ' + err.message });
+  } finally {
+    if (tmpWritten && fs.existsSync(tmpPath)) { try { fs.unlinkSync(tmpPath); } catch(_) {} }
+  }
 });
 
-socket.on('disconnect', () => log('Disconnected from server.'));
+socket.on('disconnect', (reason) => log('Disconnected: ' + reason + '. Reconnecting...'));
+socket.on('connect_error', (err) => log('Connection error: ' + err.message));
+process.on('SIGINT', () => { log('Agent stopped.'); socket.disconnect(); process.exit(0); });
