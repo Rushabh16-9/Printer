@@ -1,0 +1,269 @@
+# PrintScan — Complete Termux Command Guide
+## Every command explained step by step
+
+---
+
+## BEFORE YOU START
+
+Open the **Termux** app on your phone/tablet. You will see a black screen with a `$` sign. That means it is ready for your commands. Type or paste each command and press **Enter**.
+
+---
+
+## SECTION 1 — Install Everything (Do This Only Once)
+
+### Command 1
+```bash
+pkg update -y && pkg upgrade -y
+```
+**What this does:** Updates the app store inside Termux and upgrades all existing tools to the latest version. Like updating your phone's system. The `-y` means "say Yes automatically to all questions."
+
+---
+
+### Command 2
+```bash
+pkg install nodejs git -y
+```
+**What this does:**
+- `nodejs` = Installs Node.js, which is the engine that runs our agent script (like installing Java to run a Java app)
+- `git` = Installs Git, which is used to download our code from GitHub
+- Both are installed in one command
+
+---
+
+### Command 3 — Check Node.js is installed
+```bash
+node --version
+```
+**What this does:** Asks Node.js "what version are you?" to confirm it installed correctly.
+**You should see:** `v20.x.x` or similar
+
+---
+
+## SECTION 2 — Download the Agent Code from GitHub
+
+### Command 4
+```bash
+git clone https://github.com/Rushabh16-9/Printer.git
+```
+**What this does:** Downloads your entire project from GitHub to the phone. `clone` means "make a copy of this GitHub project on my device."
+**After this:** A new folder called `Printer` is created on your phone.
+
+---
+
+### Command 5
+```bash
+cd Printer/agent
+```
+**What this does:** `cd` means "Change Directory" (go inside a folder). This takes you into the `agent` folder where our script lives.
+**Think of it as:** Opening the `Printer` folder, then opening the `agent` folder inside it.
+
+---
+
+### Command 6
+```bash
+npm install socket.io-client uuid ipp pdf-lib
+```
+**What this does:** Downloads all the tools our agent script needs:
+- `socket.io-client` = Lets the phone talk to your Railway cloud server in real-time (like WhatsApp for apps)
+- `uuid` = Generates a unique ID for this tablet so the server can tell them apart
+- `ipp` = Lets the phone send files directly to a Wi-Fi printer (Internet Printing Protocol)
+- `pdf-lib` = Converts images (JPG/PNG) to PDF before sending to the printer
+
+---
+
+## SECTION 3 — Set Up This Specific Shop's Config
+
+This is where you give the tablet its identity. Change `shop-1` to the actual shop name.
+
+### Command 7 (CHANGE `shop-1` to your shop name!)
+```bash
+cat > .env << 'EOF'
+SERVER_URL=https://printer-production-5e39.up.railway.app
+AGENT_SECRET=my-super-secret-password-1609
+AGENT_NAME=shop-1
+PRINTER_MODE=wifi
+PRINTER_URL=http://192.168.1.50:631/ipp/print
+EOF
+```
+**What this does:** Creates a file called `.env` (a settings file) with 5 settings:
+- `SERVER_URL` = The address of your Railway cloud server (like a phone number to call)
+- `AGENT_SECRET` = A password so random people can't connect to your server
+- `AGENT_NAME` = The unique name of THIS shop. This is how the QR code routes to THIS printer!
+- `PRINTER_MODE` = Either `wifi` (Wi-Fi printer) or `usb` (USB cable printer)
+- `PRINTER_URL` = The local address of the printer on the Wi-Fi network (only needed for wifi mode)
+
+> **For USB printer:** Change `PRINTER_MODE=wifi` to `PRINTER_MODE=usb` and delete the `PRINTER_URL` line
+
+---
+
+### Command 8 — Verify the settings file was saved correctly
+```bash
+cat .env
+```
+**What this does:** `cat` means "show me the contents of this file." Use this to double-check the settings look correct.
+
+---
+
+## SECTION 4 — Test the Agent
+
+### Command 9
+```bash
+node tablet-agent.js
+```
+**What this does:** Starts the agent script. Node.js runs the `tablet-agent.js` file.
+**You should see:**
+```
+[12:01:00] PrintScan Agent starting...
+[12:01:00] Shop : shop-1 | Mode: WIFI
+[12:01:00] Cloud: https://printer-production-5e39.up.railway.app
+[12:01:02] Connected! Registering as: shop-1
+[12:01:03] Ready! Waiting for print jobs...
+```
+
+**To stop the agent:** Press `Ctrl + C`
+
+---
+
+## SECTION 5 — Test a Print Job
+
+While the agent is running (Step 9 is active), open this URL on your laptop or another phone:
+
+```
+https://printer-production-5e39.up.railway.app/?shop=shop-1
+```
+
+Upload any file and click Print. You should see this appear in Termux:
+```
+--- Print Job ---
+File   : myfile.pdf
+Copies : 1 | Colour: Yes
+SUCCESS: Printed via Wi-Fi IPP (Colour)
+```
+
+---
+
+## SECTION 6 — Make the Agent Auto-Start When Phone/Tablet Reboots
+
+Without this, you would have to manually type `node tablet-agent.js` every time the tablet restarts.
+
+### Command 10
+```bash
+mkdir -p ~/.termux/boot
+```
+**What this does:** Creates a special folder that Termux:Boot watches. Any script put here runs automatically when the device boots.
+
+---
+
+### Command 11
+```bash
+cat > ~/.termux/boot/start-printscan.sh << 'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+sleep 30
+cd ~/Printer/agent
+node tablet-agent.js >> ~/Printer/agent/logs/agent.log 2>&1 &
+EOF
+```
+**What this does:** Creates a startup script. When the tablet turns on:
+1. `sleep 30` = Wait 30 seconds (for Wi-Fi / SIM to connect first)
+2. `cd ~/Printer/agent` = Go into the agent folder
+3. `node tablet-agent.js` = Start the agent
+4. `>> logs/agent.log` = Save all logs to a file (so you can check later)
+5. `2>&1 &` = Run it in the background (tablet stays usable)
+
+---
+
+### Command 12
+```bash
+chmod +x ~/.termux/boot/start-printscan.sh
+```
+**What this does:** `chmod +x` means "make this file executable (runnable)." Without this, the script is just a text file and won't actually run.
+
+---
+
+### Command 13 — Create the logs folder
+```bash
+mkdir -p ~/Printer/agent/logs
+```
+**What this does:** Creates the `logs` folder where the agent saves its activity log.
+
+---
+
+## SECTION 7 — Check Logs (After Reboot or Later)
+
+### Command 14
+```bash
+tail -50 ~/Printer/agent/logs/agent.log
+```
+**What this does:** `tail` shows the last lines of a file. `-50` means show the last 50 lines. Use this to check what the agent has been doing (especially after a reboot).
+
+---
+
+### Command 15 — Watch logs live
+```bash
+tail -f ~/Printer/agent/logs/agent.log
+```
+**What this does:** `-f` means "follow" — it keeps showing new lines as they are added. Like a live TV channel for the agent's activity. Press `Ctrl+C` to stop watching.
+
+---
+
+## SECTION 8 — Update the Agent (When I Push New Code)
+
+Whenever I update the code and push to GitHub, run these commands to get the latest version:
+
+### Command 16
+```bash
+cd ~/Printer
+git pull origin master
+cd agent
+npm install
+```
+**What this does:**
+- `git pull origin master` = Downloads the latest code changes from GitHub
+- `npm install` = Installs any new packages that may have been added
+
+---
+
+## COMPLETE SETUP CHECKLIST
+
+Here is the exact order to run everything on a fresh tablet for a new shop:
+
+```
+1.  pkg update -y && pkg upgrade -y
+2.  pkg install nodejs git -y
+3.  node --version                         ← confirm v20+
+4.  git clone https://github.com/Rushabh16-9/Printer.git
+5.  cd Printer/agent
+6.  npm install socket.io-client uuid ipp pdf-lib
+7.  cat > .env << 'EOF'
+    SERVER_URL=https://printer-production-5e39.up.railway.app
+    AGENT_SECRET=my-super-secret-password-1609
+    AGENT_NAME=shop-2                      ← CHANGE THIS FOR EACH SHOP
+    PRINTER_MODE=wifi
+    PRINTER_URL=http://192.168.1.xx:631/ipp/print   ← CHANGE TO PRINTER IP
+    EOF
+8.  cat .env                               ← verify settings
+9.  node tablet-agent.js                  ← test it (Ctrl+C to stop)
+10. mkdir -p ~/.termux/boot
+11. cat > ~/.termux/boot/start-printscan.sh << 'EOF'
+    #!/data/data/com.termux/files/usr/bin/bash
+    sleep 30
+    cd ~/Printer/agent
+    node tablet-agent.js >> ~/Printer/agent/logs/agent.log 2>&1 &
+    EOF
+12. chmod +x ~/.termux/boot/start-printscan.sh
+13. mkdir -p ~/Printer/agent/logs
+14. Reboot tablet and check logs after 2 minutes:
+    tail -50 ~/Printer/agent/logs/agent.log
+```
+
+---
+
+## QUICK REFERENCE — QR Code for Each Shop
+
+| Shop Name in .env | QR Code URL |
+|------------------|------------|
+| `AGENT_NAME=shop-1` | `https://printer-production-5e39.up.railway.app/?shop=shop-1` |
+| `AGENT_NAME=shop-2` | `https://printer-production-5e39.up.railway.app/?shop=shop-2` |
+| `AGENT_NAME=mumbai-shop` | `https://printer-production-5e39.up.railway.app/?shop=mumbai-shop` |
+
+Go to **qr.io**, paste the URL, download the image, print it, and stick it on the shop wall!
