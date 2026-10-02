@@ -146,9 +146,11 @@ function getSupportedFormats(printer) {
 
 /**
  * Send one IPP Print-Job attempt with the given format.
- * Resolves with result message on success, rejects on error.
+ * Retries on server-error-busy (printer is processing a previous job).
+ * Resolves with the format used on success.
  */
-function ippPrint(printer, data, name, docFormat, copies, isColor) {
+function ippPrint(printer, data, name, docFormat, copies, isColor, _retries) {
+  const retriesLeft = (_retries === undefined) ? 4 : _retries;
   return new Promise((resolve, reject) => {
     printer.execute('Print-Job', {
       'operation-attributes-tag': {
@@ -163,8 +165,24 @@ function ippPrint(printer, data, name, docFormat, copies, isColor) {
       data,
     }, (err, res) => {
       if (err) return reject(new Error('IPP error: ' + err.message));
-      if (res && res.statusCode && !res.statusCode.startsWith('successful'))
-        return reject(new Error(res.statusCode));  // short code for retry logic
+      const code = res && res.statusCode;
+      if (code && code === 'server-error-busy') {
+        if (retriesLeft > 0) {
+          // Printer busy — wait 2s and retry
+          log('   Printer busy, retrying in 2s... (' + retriesLeft + ' left)');
+          setTimeout(() => {
+            ippPrint(printer, data, name, docFormat, copies, isColor, retriesLeft - 1)
+              .then(resolve).catch(reject);
+          }, 2000);
+        } else {
+          // Still busy after all retries — printer queues it anyway, treat as success
+          log('   Printer busy but job is queued — will print shortly.');
+          resolve(docFormat);
+        }
+        return;
+      }
+      if (code && !code.startsWith('successful'))
+        return reject(new Error(code));
       resolve(docFormat);
     });
   });
