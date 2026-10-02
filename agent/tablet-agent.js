@@ -149,7 +149,7 @@ async function printWifi(buf, name, copies, isColor) {
     : candidates;
   // De-duplicate
   const queue = [...new Set(toTry)];
-  log('   Will try formats in order: ' + queue.join(' → '));
+  log('   Will try formats in order: ' + queue.join(' -> '));
 
   // For each candidate, prepare the right buffer and try printing
   for (const fmt of queue) {
@@ -180,7 +180,13 @@ async function printWifi(buf, name, copies, isColor) {
 }
 
 async function printUSB(buf, name, copies) {
-  const { buf: data } = await prepareBuffer(buf, name);
+  // For USB: convert images to PDF, send PDFs as-is
+  let data = buf;
+  const ext = path.extname(name).toLowerCase();
+  if (['.jpg', '.jpeg', '.png'].includes(ext)) {
+    log('   Converting image to PDF for USB...');
+    data = await imageToPdfBuffer(buf, ext);
+  }
   const tmpPath = path.join(TEMP_DIR, 'usb_' + Date.now() + '.pdf');
   fs.writeFileSync(tmpPath, data);
   const numCopies = Math.min(parseInt(copies) || 1, 20);
