@@ -306,6 +306,9 @@ const HTML = `<!DOCTYPE html>
     #print-btn:active:not(:disabled){transform:translateY(0)}
     #print-btn:disabled{opacity:.4;cursor:not-allowed}
     #print-btn svg{width:20px;height:20px}
+    #cancel-btn{width:100%;padding:14px 28px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);border-radius:14px;color:#f87171;font-family:'Outfit',sans-serif;font-size:.95rem;font-weight:700;cursor:pointer;display:none;align-items:center;justify-content:center;gap:8px;margin-top:10px;transition:all .2s ease}
+    #cancel-btn:hover:not(:disabled){background:rgba(239,68,68,.22);border-color:rgba(239,68,68,.65);transform:translateY(-1px)}
+    #cancel-btn:disabled{opacity:.4;cursor:not-allowed}
     #status{display:none;margin-top:18px;padding:14px 18px;border-radius:12px;font-size:.9rem;font-weight:500;align-items:center;gap:10px;animation:slide-up .3s ease}
     @keyframes slide-up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
     #status.success{background:rgba(16,185,129,.18);border:1px solid rgba(16,185,129,.3);color:#34d399}
@@ -372,6 +375,10 @@ const HTML = `<!DOCTYPE html>
         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6v-8z"/></svg>
         Print
       </button>
+      <button id="cancel-btn" aria-label="Cancel print job">
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+        Cancel Print Job
+      </button>
     </div>
     <div id="status" role="alert" aria-live="polite"></div>
   </div>
@@ -389,7 +396,8 @@ const HTML = `<!DOCTYPE html>
     agentLabel=document.getElementById('agent-label'),
     s1=document.getElementById('s1'),s2=document.getElementById('s2'),s3=document.getElementById('s3'),
     btnColorYes=document.getElementById('btn-color-yes'),btnColorNo=document.getElementById('btn-color-no');
-  let currentFile=null,fileReady=false,isColourSelected=true;
+  const cancelBtn=document.getElementById('cancel-btn');
+  let currentFile=null,fileReady=false,isColourSelected=true,currentFileId=null;
   async function checkAgentStatus(){
     try {
       const urlParams = new URLSearchParams(window.location.search);
@@ -430,7 +438,7 @@ const HTML = `<!DOCTYPE html>
   function hideStatus(){statusEl.style.display='none';statusEl.innerHTML='';}
   function setStep(n){[s1,s2,s3].forEach((s,i)=>{s.className='step'+(i<n-1?' done':i===n-1?' active':'');});}
   function reset(){currentFile=null;fileReady=false;dropZone.style.display='';preview.style.display='none';printSec.style.display='none';progWrap.style.display='none';printBtn.disabled=true;hideStatus();setStep(1);}
-  function handleFile(file){if(!file)return;currentFile=file;fileReady=false;printBtn.disabled=true;const cat=getCategory(file.name);fileIcon.className='file-icon '+cat;fileIcon.textContent=getEmoji(cat);fileName.textContent=file.name;fileMeta.textContent=fmtBytes(file.size);progFill.style.width='0%';progWrap.style.display='';dropZone.style.display='none';preview.style.display='flex';printSec.style.display='block';hideStatus();setStep(2);const fd=new FormData();fd.append('file',file);const xhr=new XMLHttpRequest();xhr.open('POST','/api/upload');xhr.upload.onprogress=function(e){if(e.lengthComputable)progFill.style.width=Math.round(e.loaded/e.total*100)+'%';};xhr.onload=function(){progWrap.style.display='none';if(xhr.status===200){const res=JSON.parse(xhr.responseText);window._uploadedFileId=res.fileId;fileMeta.textContent=fmtBytes(file.size)+' — Ready ?';fileReady=true;printBtn.disabled=false;}else{showStatus('Upload failed. Please try again.','error');reset();}};xhr.onerror=function(){showStatus('Network error.','error');reset();};xhr.send(fd);}
+  function handleFile(file){if(!file)return;currentFile=file;fileReady=false;printBtn.disabled=true;const cat=getCategory(file.name);fileIcon.className='file-icon '+cat;fileIcon.textContent=getEmoji(cat);fileName.textContent=file.name;fileMeta.textContent=fmtBytes(file.size);progFill.style.width='0%';progWrap.style.display='';dropZone.style.display='none';preview.style.display='flex';printSec.style.display='block';hideStatus();setStep(2);const fd=new FormData();fd.append('file',file);const xhr=new XMLHttpRequest();xhr.open('POST','/api/upload');xhr.upload.onprogress=function(e){if(e.lengthComputable)progFill.style.width=Math.round(e.loaded/e.total*100)+'%';};xhr.onload=function(){progWrap.style.display='none';if(xhr.status===200){const res=JSON.parse(xhr.responseText);window._uploadedFileId=res.fileId;currentFileId=res.fileId;fileMeta.textContent=fmtBytes(file.size)+' — Ready ?';fileReady=true;printBtn.disabled=false;}else{showStatus('Upload failed. Please try again.','error');reset();}};xhr.onerror=function(){showStatus('Network error.','error');reset();};xhr.send(fd);}
   dropZone.addEventListener('click',()=>fileInput.click());
   dropZone.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')fileInput.click();});
   dropZone.addEventListener('dragover',e=>{e.preventDefault();dropZone.classList.add('over');});
@@ -438,9 +446,10 @@ const HTML = `<!DOCTYPE html>
   dropZone.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remove('over');const f=e.dataTransfer.files[0];if(f)handleFile(f);});
   fileInput.addEventListener('change',e=>{const f=e.target.files[0];if(f)handleFile(f);e.target.value='';});
   rmBtn.addEventListener('click',reset);
-  printBtn.addEventListener('click',async function(){if(!fileReady||!window._uploadedFileId)return;printBtn.disabled=true;showStatus('Sending to printer...','loading');setStep(3);try{const urlParams = new URLSearchParams(window.location.search); const shopId = urlParams.get('shop') || '';
+  printBtn.addEventListener('click',async function(){if(!fileReady||!window._uploadedFileId)return;printBtn.disabled=true;cancelBtn.style.display='flex';showStatus('Sending to printer...','loading');setStep(3);try{const urlParams = new URLSearchParams(window.location.search); const shopId = urlParams.get('shop') || '';
 const reqBody = {fileId:window._uploadedFileId,originalName:currentFile.name,copies:parseInt(copiesIn.value)||1,color:isColourSelected, shopId};
-const res=await fetch('/api/print-job',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(reqBody)});const data=await res.json();if(data.success){showStatus(data.message||'Your file has been sent to the printer!','success');s1.className='step done';s2.className='step done';s3.className='step done';setTimeout(reset,8000);}else{throw new Error(data.error||'Unknown error');}}catch(err){showStatus('Print error: '+err.message,'error');printBtn.disabled=false;setStep(2);}});
+const res=await fetch('/api/print-job',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(reqBody)});const data=await res.json();cancelBtn.style.display='none';if(data.success){showStatus(data.message||'Your file has been sent to the printer!','success');s1.className='step done';s2.className='step done';s3.className='step done';setTimeout(reset,8000);}else{throw new Error(data.error||'Unknown error');}}catch(err){cancelBtn.style.display='none';showStatus('Print error: '+err.message,'error');printBtn.disabled=false;setStep(2);}});
+  cancelBtn.addEventListener('click',async function(){if(!currentFileId)return;cancelBtn.disabled=true;showStatus('Canceling print job...','loading');try{const shopId=new URLSearchParams(window.location.search).get('shop')||'';const res=await fetch('/api/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fileId:currentFileId,shopId})});const data=await res.json();showStatus(data.message||'Print job canceled.','error');}catch(e){showStatus('Cancel request failed: '+e.message,'error');}cancelBtn.style.display='none';cancelBtn.disabled=false;printBtn.disabled=false;setStep(2);});
 })();
 </script>
 </body>

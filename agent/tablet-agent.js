@@ -55,6 +55,10 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 const LOG_DIR = path.join(__dirname, 'logs');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
 
+// Active IPP jobs: fileId -> { printer, jobId, canceled }
+// Used to cancel a specific job on demand.
+const activeIppJobs = new Map();
+
 function log(msg) {
   const line = '[' + new Date().toLocaleTimeString() + '] ' + msg;
   console.log(line);
@@ -192,12 +196,16 @@ function ippSubmitJob(printer, data, name, docFormat, copies, isColor, retriesLe
  * job-state values: 3=pending 4=pending-held 5=processing 6=processing-stopped
  *                   7=canceled 8=aborted 9=completed
  */
-function waitForJobCompletion(printer, jobId) {
+function waitForJobCompletion(printer, jobId, fileId) {
   const MAX_MS   = 5 * 60 * 1000; // 5 min max
   const POLL_MS  = 2500;
   const start    = Date.now();
   return new Promise((resolve, reject) => {
     function poll() {
+      // Check if user requested cancel
+      const job = fileId && activeIppJobs.get(fileId);
+      if (job && job.canceled) return reject(new Error('Print job canceled by user'));
+
       if (Date.now() - start > MAX_MS)
         return reject(new Error('Timed out waiting for print job to finish'));
       printer.execute('Get-Job-Attributes', {
@@ -207,15 +215,12 @@ function waitForJobCompletion(printer, jobId) {
           'requested-attributes': ['job-state', 'job-state-reasons'],
         },
       }, (err, res) => {
-        if (err) {
-          // Can't query status — assume still printing, keep polling
-          return setTimeout(poll, POLL_MS);
-        }
+        if (err) return setTimeout(poll, POLL_MS); // can't query, keep polling
         const attrs   = res && res['job-attributes-tag'];
         const state   = attrs && attrs['job-state'];
         const reasons = (attrs && attrs['job-state-reasons']) || '';
-        if (state === 9)  return resolve();                                        // completed ✅
-        if (state === 7)  return reject(new Error('Print job canceled by printer'));
+        if (state === 9)  return resolve();  // completed ✅
+        if (state === 7)  return reject(new Error('Print job canceled on printer'));
         if (state === 8)  return reject(new Error('Print job aborted: ' + reasons));
         log('   Job #' + jobId + ' state=' + (state || '?') + ' — waiting...');
         setTimeout(poll, POLL_MS);
@@ -229,14 +234,19 @@ function waitForJobCompletion(printer, jobId) {
  * Submit a print job and wait until it is truly completed on the printer.
  * Reports success only after all pages have physically printed.
  */
-async function ippPrint(printer, data, name, docFormat, copies, isColor) {
+async function ippPrint(printer, data, name, docFormat, copies, isColor, fileId) {
   const { jobId } = await ippSubmitJob(printer, data, name, docFormat, copies, isColor);
   if (jobId) {
+    // Register job so cancel handler can target it
+    if (fileId) activeIppJobs.set(fileId, { printer, jobId, canceled: false });
     log('   Job #' + jobId + ' accepted — waiting for completion...');
-    await waitForJobCompletion(printer, jobId);
+    try {
+      await waitForJobCompletion(printer, jobId, fileId);
+    } finally {
+      if (fileId) activeIppJobs.delete(fileId);
+    }
     log('   Job #' + jobId + ' completed successfully.');
   } else {
-    // Printer didn't return a job-id (rare) — wait fixed time
     log('   Job accepted (no job-id). Waiting 8s for printer...');
     await new Promise(r => setTimeout(r, 8000));
   }
@@ -244,30 +254,28 @@ async function ippPrint(printer, data, name, docFormat, copies, isColor) {
 }
 
 
-async function printWifi(buf, name, copies, isColor) {
+async function printWifi(buf, name, copies, isColor, fileId) {
   if (!PRINTER_URL) throw new Error('PRINTER_URL not set in .env');
 
   const ext = path.extname(name).toLowerCase();
   const printer = ipp.Printer(PRINTER_URL);
 
-  // Query what formats the printer supports
   const supported = await getSupportedFormats(printer);
   log('   Printer supports: ' + (supported.join(', ') || '(unknown)'));
 
-  // ── Special case: PDF file but printer does NOT support application/pdf ──
-  // Convert each page to JPEG and print via image/jpeg (which this printer supports).
+  // PDF but printer doesn't support application/pdf → convert pages to JPEG
   if (ext === '.pdf' && !supported.includes('application/pdf') && supported.includes('image/jpeg')) {
     log('   PDF not natively supported. Converting pages to JPEG via ghostscript...');
     const pages = await pdfToJpegBuffers(buf);
     log('   Converted ' + pages.length + ' page(s). Printing...');
     for (let i = 0; i < pages.length; i++) {
       log('   Printing page ' + (i + 1) + '/' + pages.length + '...');
-      await ippPrint(printer, pages[i], name + '_p' + (i + 1), 'image/jpeg', copies, isColor);
+      await ippPrint(printer, pages[i], name + '_p' + (i + 1), 'image/jpeg', copies, isColor, fileId);
     }
     return 'Printed ' + pages.length + ' page(s) via Wi-Fi IPP (' + (isColor ? 'Colour' : 'B&W') + ') as JPEG';
   }
 
-  // ── Generic retry loop for all other formats ──
+  // Generic format retry loop
   const candidates = getMimeCandidates(ext);
   const toTry = supported.length > 0
     ? [...candidates.filter(f => supported.includes(f)), 'application/octet-stream']
@@ -283,7 +291,7 @@ async function printWifi(buf, name, copies, isColor) {
     }
     log('   Trying document-format: ' + fmt);
     try {
-      const usedFmt = await ippPrint(printer, data, name, fmt, copies, isColor);
+      const usedFmt = await ippPrint(printer, data, name, fmt, copies, isColor, fileId);
       return 'Printed via Wi-Fi IPP (' + (isColor ? 'Colour' : 'B&W') + ') as ' + usedFmt;
     } catch (err) {
       const msg = err.message || '';
@@ -291,12 +299,11 @@ async function printWifi(buf, name, copies, isColor) {
         log('   Format ' + fmt + ' rejected — trying next...');
         continue;
       }
-      throw err;
+      throw err;  // includes 'canceled by user' — propagates up immediately
     }
   }
 
-  throw new Error('Printer rejected all attempted formats: ' + queue.join(', ') +
-    '. Check PRINTER_URL and printer IPP settings.');
+  throw new Error('Printer rejected all attempted formats: ' + queue.join(', '));
 }
 
 async function printUSB(buf, name, copies) {
@@ -334,10 +341,10 @@ async function printUSB(buf, name, copies) {
   });
 }
 
-async function print(buf, name, copies, isColor) {
+async function print(buf, name, copies, isColor, fileId) {
   return PRINTER_MODE === 'usb'
     ? await printUSB(buf, name, copies)
-    : await printWifi(buf, name, copies, isColor);
+    : await printWifi(buf, name, copies, isColor, fileId);
 }
 
 log('PrintScan Agent starting...');
@@ -380,15 +387,57 @@ socket.on('print:execute', async (data) => {
     const buf = Buffer.from(fileBase64, 'base64');
     fs.writeFileSync(tmpPath, buf);
     tmpWritten = true;
-    const message = await print(buf, originalName, numCopies, isColor);
+    const message = await print(buf, originalName, numCopies, isColor, fileId);
     log('SUCCESS: ' + message);
     socket.emit('print:result', { fileId, originalName, success: true, message, requestSocketId });
   } catch (err) {
     log('FAILED : ' + err.message);
     socket.emit('print:result', { fileId, originalName, success: false, message: 'Print error: ' + err.message, requestSocketId });
   } finally {
+    activeIppJobs.delete(fileId);
     if (tmpWritten && fs.existsSync(tmpPath)) { try { fs.unlinkSync(tmpPath); } catch(_) {} }
   }
+});
+
+// ── Cancel handler ────────────────────────────────────────────────────────────
+socket.on('print:cancel', (data) => {
+  const { fileId } = data;
+  log('\nCancel request for job: ' + fileId);
+
+  const job = activeIppJobs.get(fileId);
+  if (!job) {
+    log('   No active IPP job found — may have already finished.');
+    socket.emit('print:cancel:result', { fileId, success: false, message: 'No active print job found to cancel.' });
+    return;
+  }
+
+  // Signal the polling loop to stop immediately
+  job.canceled = true;
+
+  if (job.jobId && job.printer) {
+    log('   Sending IPP Cancel-Job #' + job.jobId + '...');
+    job.printer.execute('Cancel-Job', {
+      'operation-attributes-tag': {
+        'requesting-user-name': 'PrintScan',
+        'job-id': job.jobId,
+      },
+    }, (err, res) => {
+      const code = res && res.statusCode;
+      const ok = !err && code && code.startsWith('successful');
+      log('   Cancel-Job result: ' + (ok ? 'OK' : (err ? err.message : code)));
+      socket.emit('print:cancel:result', {
+        fileId,
+        success: true,
+        message: ok
+          ? 'Print job #' + job.jobId + ' canceled on printer.'
+          : 'Stop signal sent. Printer may finish current page.',
+      });
+    });
+  } else {
+    socket.emit('print:cancel:result', { fileId, success: true, message: 'Print job stopped.' });
+  }
+
+  activeIppJobs.delete(fileId);
 });
 
 socket.on('disconnect', (reason) => log('Disconnected: ' + reason + '. Reconnecting...'));
