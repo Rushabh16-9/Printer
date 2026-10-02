@@ -8,6 +8,7 @@
     "dev": "nodemon agent.js"
   },
   "dependencies": {
+    "ipp": "^2.2.6",
     "pdf-lib": "^1.17.1",
     "pdf-to-printer": "^5.8.1",
     "socket.io-client": "^4.7.2",
