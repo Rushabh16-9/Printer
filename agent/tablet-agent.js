@@ -71,6 +71,45 @@ async function imageToPdfBuffer(imgBuf, ext) {
 }
 
 /**
+ * Convert a PDF buffer to an array of JPEG page buffers using ghostscript.
+ * Requires: pkg install ghostscript  (on Termux)
+ */
+async function pdfToJpegBuffers(pdfBuf) {
+  const tmpId = Date.now();
+  const pdfPath  = path.join(TEMP_DIR, 'gs_in_'  + tmpId + '.pdf');
+  const outGlob  = 'gs_out_' + tmpId + '_';
+  const outPatt  = path.join(TEMP_DIR, outGlob + '%04d.jpg');
+  fs.writeFileSync(pdfPath, pdfBuf);
+  try {
+    await new Promise((resolve, reject) => {
+      exec(
+        'gs -dNOPAUSE -dBATCH -sDEVICE=jpeg -r150 -dJPEGQ=90 "-sOutputFile=' + outPatt + '" "' + pdfPath + '"',
+        { timeout: 120000 },
+        (err, _, stderr) => {
+          if (err) return reject(new Error(
+            'Ghostscript failed. Run: pkg install ghostscript\n' + (stderr || err.message)
+          ));
+          resolve();
+        }
+      );
+    });
+    const pages = fs.readdirSync(TEMP_DIR)
+      .filter(f => f.startsWith(outGlob) && f.endsWith('.jpg'))
+      .sort()
+      .map(f => {
+        const p = path.join(TEMP_DIR, f);
+        const b = fs.readFileSync(p);
+        try { fs.unlinkSync(p); } catch(_) {}
+        return b;
+      });
+    if (!pages.length) throw new Error('Ghostscript produced no pages. PDF may be corrupt.');
+    return pages;
+  } finally {
+    try { fs.unlinkSync(pdfPath); } catch(_) {}
+  }
+}
+
+/**
  * Map file extension to MIME type candidates (in priority order).
  * For images we try native format first (HP printers support image/jpeg natively),
  * then fall back to PDF, then octet-stream.
@@ -141,26 +180,33 @@ async function printWifi(buf, name, copies, isColor) {
   const supported = await getSupportedFormats(printer);
   log('   Printer supports: ' + (supported.join(', ') || '(unknown)'));
 
-  // Build candidate list: formats we can actually send, in priority order
+  // ── Special case: PDF file but printer does NOT support application/pdf ──
+  // Convert each page to JPEG and print via image/jpeg (which this printer supports).
+  if (ext === '.pdf' && !supported.includes('application/pdf') && supported.includes('image/jpeg')) {
+    log('   PDF not natively supported. Converting pages to JPEG via ghostscript...');
+    const pages = await pdfToJpegBuffers(buf);
+    log('   Converted ' + pages.length + ' page(s). Printing...');
+    for (let i = 0; i < pages.length; i++) {
+      log('   Printing page ' + (i + 1) + '/' + pages.length + '...');
+      await ippPrint(printer, pages[i], name + '_p' + (i + 1), 'image/jpeg', copies, isColor);
+    }
+    return 'Printed ' + pages.length + ' page(s) via Wi-Fi IPP (' + (isColor ? 'Colour' : 'B&W') + ') as JPEG';
+  }
+
+  // ── Generic retry loop for all other formats ──
   const candidates = getMimeCandidates(ext);
-  // If printer advertised formats, keep only ones it listed + always keep octet-stream as last resort
   const toTry = supported.length > 0
     ? [...candidates.filter(f => supported.includes(f)), 'application/octet-stream']
     : candidates;
-  // De-duplicate
   const queue = [...new Set(toTry)];
   log('   Will try formats in order: ' + queue.join(' -> '));
 
-  // For each candidate, prepare the right buffer and try printing
   for (const fmt of queue) {
     let data = buf;
-
     if (fmt === 'application/pdf' && ['.jpg', '.jpeg', '.png'].includes(ext)) {
       log('   Converting image to PDF for format ' + fmt + '...');
       data = await imageToPdfBuffer(buf, ext);
     }
-    // For image/jpeg, image/png, octet-stream — send raw buffer as-is
-
     log('   Trying document-format: ' + fmt);
     try {
       const usedFmt = await ippPrint(printer, data, name, fmt, copies, isColor);
@@ -169,9 +215,9 @@ async function printWifi(buf, name, copies, isColor) {
       const msg = err.message || '';
       if (msg.includes('document-format-not-supported') || msg.includes('client-error')) {
         log('   Format ' + fmt + ' rejected — trying next...');
-        continue;  // try next format
+        continue;
       }
-      throw err;  // real error (not a format issue)
+      throw err;
     }
   }
 
