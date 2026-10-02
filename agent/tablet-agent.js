@@ -70,13 +70,16 @@ async function imageToPdfBuffer(imgBuf, ext) {
   return Buffer.from(await doc.save());
 }
 
-async function prepareBuffer(buf, name) {
-  const ext = path.extname(name).toLowerCase();
-  if (['.jpg', '.jpeg', '.png'].includes(ext)) {
-    log('   Converting image to PDF...');
-    return { buf: await imageToPdfBuffer(buf, ext), mime: 'application/pdf' };
-  }
-  return { buf, mime: ext === '.pdf' ? 'application/pdf' : 'application/octet-stream' };
+/**
+ * Map file extension to MIME type candidates (in priority order).
+ * For images we try native format first (HP printers support image/jpeg natively),
+ * then fall back to PDF, then octet-stream.
+ */
+function getMimeCandidates(ext) {
+  if (ext === '.jpg' || ext === '.jpeg') return ['image/jpeg', 'application/pdf', 'application/octet-stream'];
+  if (ext === '.png')                    return ['image/png',  'application/pdf', 'application/octet-stream'];
+  if (ext === '.pdf')                    return ['application/pdf', 'application/octet-stream'];
+  return ['application/octet-stream'];
 }
 
 /**
@@ -97,40 +100,16 @@ function getSupportedFormats(printer) {
         const fmts = attrs && attrs['document-format-supported'];
         if (!fmts) return resolve([]);
         resolve(Array.isArray(fmts) ? fmts : [fmts]);
-      } catch (_) {
-        resolve([]);
-      }
+      } catch (_) { resolve([]); }
     });
   });
 }
 
 /**
- * Choose the best document format to send.
- * Priority: application/pdf > application/postscript > application/octet-stream
- * If none of those match, use application/octet-stream as a universal fallback.
+ * Send one IPP Print-Job attempt with the given format.
+ * Resolves with result message on success, rejects on error.
  */
-function chooseBestFormat(supported, preferred) {
-  if (!supported || supported.length === 0) return 'application/octet-stream';
-  const priority = [preferred, 'application/pdf', 'application/postscript', 'application/octet-stream'];
-  for (const fmt of priority) {
-    if (fmt && supported.includes(fmt)) return fmt;
-  }
-  // Printer doesn't advertise octet-stream — use it anyway as last resort
-  return 'application/octet-stream';
-}
-
-async function printWifi(buf, name, copies, isColor) {
-  if (!PRINTER_URL) throw new Error('PRINTER_URL not set in .env');
-  const { buf: data, mime: preferredMime } = await prepareBuffer(buf, name);
-  const printer = ipp.Printer(PRINTER_URL);
-
-  // Query printer for supported formats
-  const supported = await getSupportedFormats(printer);
-  log('   Printer supports: ' + (supported.join(', ') || '(unknown — will use octet-stream)'));
-
-  const docFormat = chooseBestFormat(supported, preferredMime);
-  log('   Using document-format: ' + docFormat);
-
+function ippPrint(printer, data, name, docFormat, copies, isColor) {
   return new Promise((resolve, reject) => {
     printer.execute('Print-Job', {
       'operation-attributes-tag': {
@@ -146,10 +125,58 @@ async function printWifi(buf, name, copies, isColor) {
     }, (err, res) => {
       if (err) return reject(new Error('IPP error: ' + err.message));
       if (res && res.statusCode && !res.statusCode.startsWith('successful'))
-        return reject(new Error('Printer rejected: ' + res.statusCode + ' (format used: ' + docFormat + ')'));
-      resolve('Printed via Wi-Fi IPP (' + (isColor ? 'Colour' : 'B&W') + ') as ' + docFormat);
+        return reject(new Error(res.statusCode));  // short code for retry logic
+      resolve(docFormat);
     });
   });
+}
+
+async function printWifi(buf, name, copies, isColor) {
+  if (!PRINTER_URL) throw new Error('PRINTER_URL not set in .env');
+
+  const ext = path.extname(name).toLowerCase();
+  const printer = ipp.Printer(PRINTER_URL);
+
+  // Query what formats the printer supports
+  const supported = await getSupportedFormats(printer);
+  log('   Printer supports: ' + (supported.join(', ') || '(unknown)'));
+
+  // Build candidate list: formats we can actually send, in priority order
+  const candidates = getMimeCandidates(ext);
+  // If printer advertised formats, keep only ones it listed + always keep octet-stream as last resort
+  const toTry = supported.length > 0
+    ? [...candidates.filter(f => supported.includes(f)), 'application/octet-stream']
+    : candidates;
+  // De-duplicate
+  const queue = [...new Set(toTry)];
+  log('   Will try formats in order: ' + queue.join(' → '));
+
+  // For each candidate, prepare the right buffer and try printing
+  for (const fmt of queue) {
+    let data = buf;
+
+    if (fmt === 'application/pdf' && ['.jpg', '.jpeg', '.png'].includes(ext)) {
+      log('   Converting image to PDF for format ' + fmt + '...');
+      data = await imageToPdfBuffer(buf, ext);
+    }
+    // For image/jpeg, image/png, octet-stream — send raw buffer as-is
+
+    log('   Trying document-format: ' + fmt);
+    try {
+      const usedFmt = await ippPrint(printer, data, name, fmt, copies, isColor);
+      return 'Printed via Wi-Fi IPP (' + (isColor ? 'Colour' : 'B&W') + ') as ' + usedFmt;
+    } catch (err) {
+      const msg = err.message || '';
+      if (msg.includes('document-format-not-supported') || msg.includes('client-error')) {
+        log('   Format ' + fmt + ' rejected — trying next...');
+        continue;  // try next format
+      }
+      throw err;  // real error (not a format issue)
+    }
+  }
+
+  throw new Error('Printer rejected all attempted formats: ' + queue.join(', ') +
+    '. Check PRINTER_URL and printer IPP settings.');
 }
 
 async function printUSB(buf, name, copies) {
