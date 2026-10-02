@@ -79,16 +79,64 @@ async function prepareBuffer(buf, name) {
   return { buf, mime: ext === '.pdf' ? 'application/pdf' : 'application/octet-stream' };
 }
 
+/**
+ * Query the printer for supported document formats via IPP Get-Printer-Attributes.
+ * Returns an array of MIME type strings, or [] on failure.
+ */
+function getSupportedFormats(printer) {
+  return new Promise((resolve) => {
+    printer.execute('Get-Printer-Attributes', {
+      'operation-attributes-tag': {
+        'requesting-user-name': 'PrintScan',
+        'requested-attributes': ['document-format-supported'],
+      },
+    }, (err, res) => {
+      if (err || !res) return resolve([]);
+      try {
+        const attrs = res['printer-attributes-tag'];
+        const fmts = attrs && attrs['document-format-supported'];
+        if (!fmts) return resolve([]);
+        resolve(Array.isArray(fmts) ? fmts : [fmts]);
+      } catch (_) {
+        resolve([]);
+      }
+    });
+  });
+}
+
+/**
+ * Choose the best document format to send.
+ * Priority: application/pdf > application/postscript > application/octet-stream
+ * If none of those match, use application/octet-stream as a universal fallback.
+ */
+function chooseBestFormat(supported, preferred) {
+  if (!supported || supported.length === 0) return 'application/octet-stream';
+  const priority = [preferred, 'application/pdf', 'application/postscript', 'application/octet-stream'];
+  for (const fmt of priority) {
+    if (fmt && supported.includes(fmt)) return fmt;
+  }
+  // Printer doesn't advertise octet-stream — use it anyway as last resort
+  return 'application/octet-stream';
+}
+
 async function printWifi(buf, name, copies, isColor) {
   if (!PRINTER_URL) throw new Error('PRINTER_URL not set in .env');
-  const { buf: data, mime } = await prepareBuffer(buf, name);
+  const { buf: data, mime: preferredMime } = await prepareBuffer(buf, name);
   const printer = ipp.Printer(PRINTER_URL);
+
+  // Query printer for supported formats
+  const supported = await getSupportedFormats(printer);
+  log('   Printer supports: ' + (supported.join(', ') || '(unknown — will use octet-stream)'));
+
+  const docFormat = chooseBestFormat(supported, preferredMime);
+  log('   Using document-format: ' + docFormat);
+
   return new Promise((resolve, reject) => {
     printer.execute('Print-Job', {
       'operation-attributes-tag': {
         'requesting-user-name': 'PrintScan',
         'job-name': name,
-        'document-format': mime,
+        'document-format': docFormat,
       },
       'job-attributes-tag': {
         'copies': Math.min(parseInt(copies) || 1, 20),
@@ -98,8 +146,8 @@ async function printWifi(buf, name, copies, isColor) {
     }, (err, res) => {
       if (err) return reject(new Error('IPP error: ' + err.message));
       if (res && res.statusCode && !res.statusCode.startsWith('successful'))
-        return reject(new Error('Printer rejected: ' + res.statusCode));
-      resolve('Printed via Wi-Fi IPP (' + (isColor ? 'Colour' : 'B&W') + ')');
+        return reject(new Error('Printer rejected: ' + res.statusCode + ' (format used: ' + docFormat + ')'));
+      resolve('Printed via Wi-Fi IPP (' + (isColor ? 'Colour' : 'B&W') + ') as ' + docFormat);
     });
   });
 }
