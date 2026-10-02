@@ -19,7 +19,6 @@ const fs       = require('fs');
 const { exec } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const ipp      = require('ipp');
-const net      = require('net');
 
 // Load .env
 const envPath = path.join(__dirname, '.env');
@@ -134,33 +133,7 @@ async function printUSB(buf, name, copies) {
   });
 }
 
-async function printTcp(buf, name, copies, isColor) {
-  if (!PRINTER_URL) throw new Error('PRINTER_URL not set in .env');
-  const { buf: data } = await prepareBuffer(buf, name);
-  
-  let ip = PRINTER_URL;
-  try { ip = new URL(PRINTER_URL).hostname; } catch(e) { ip = PRINTER_URL.replace('http://', '').split(':')[0].split('/')[0]; }
-
-  log(`   [TCP MODE] Sending document directly to ${ip}:9100`);
-  return new Promise((resolve, reject) => {
-    const client = new net.Socket();
-    client.setTimeout(15000);
-    client.on('error', (err) => reject(new Error('TCP connect error: ' + err.message)));
-    client.on('timeout', () => { client.destroy(); reject(new Error('TCP connection timed out')); });
-    
-    client.connect(9100, ip, () => {
-      try {
-        const numCopies = Math.min(parseInt(copies) || 1, 20);
-        for(let i=0; i<numCopies; i++) client.write(data);
-        client.end();
-      } catch (err) { reject(err); }
-    });
-    client.on('close', () => resolve('Printed via RAW TCP Port 9100 (' + (isColor ? 'Colour' : 'B&W') + ')'));
-  });
-}
-
 async function print(buf, name, copies, isColor) {
-  if (PRINTER_MODE === 'tcp') return await printTcp(buf, name, copies, isColor);
   return PRINTER_MODE === 'usb'
     ? await printUSB(buf, name, copies)
     : await printWifi(buf, name, copies, isColor);
@@ -194,7 +167,7 @@ socket.on('agent:rejected', (data) => {
 });
 
 socket.on('print:execute', async (data) => {
-  const { fileId, originalName, fileBase64, copies, color = true } = data;
+  const { fileId, originalName, fileBase64, copies, color = true, requestSocketId } = data;
   const isColor = color !== false && color !== 'false';
   const numCopies = Math.min(parseInt(copies) || 1, 20);
   log('\n--- Print Job ---');
@@ -208,10 +181,10 @@ socket.on('print:execute', async (data) => {
     tmpWritten = true;
     const message = await print(buf, originalName, numCopies, isColor);
     log('SUCCESS: ' + message);
-    socket.emit('print:result', { fileId, originalName, success: true, message });
+    socket.emit('print:result', { fileId, originalName, success: true, message, requestSocketId });
   } catch (err) {
     log('FAILED : ' + err.message);
-    socket.emit('print:result', { fileId, originalName, success: false, message: 'Print error: ' + err.message });
+    socket.emit('print:result', { fileId, originalName, success: false, message: 'Print error: ' + err.message, requestSocketId });
   } finally {
     if (tmpWritten && fs.existsSync(tmpPath)) { try { fs.unlinkSync(tmpPath); } catch(_) {} }
   }

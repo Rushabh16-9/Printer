@@ -1,4 +1,4 @@
-﻿/**
+/**
  * PrintScan - Print Agent (Windows)
  *
  * Run this on any Windows PC with a printer connected.
@@ -299,7 +299,7 @@ socket.on('agent:rejected', (data) => {
 // --- PRINT JOB HANDLER ---
 
 socket.on('print:execute', async (data) => {
-  const { fileId, originalName, fileBase64, copies, color = true } = data;
+  const { fileId, originalName, fileBase64, copies, color = true, requestSocketId } = data;
   const isColor = color !== false && color !== 'false';
   const numCopies = Math.min(parseInt(copies) || 1, 20);
 
@@ -317,6 +317,7 @@ socket.on('print:execute', async (data) => {
       success: false,
       message: 'No physical printer found on the printing PC. Please connect a printer.',
       printerName: null,
+      requestSocketId,
     });
     return;
   }
@@ -342,6 +343,7 @@ socket.on('print:execute', async (data) => {
       success: true,
       message,
       printerName,
+      requestSocketId,
     });
   } catch (err) {
     log('   Print failed: ' + err.message);
@@ -351,6 +353,7 @@ socket.on('print:execute', async (data) => {
       success: false,
       message: 'Print error: ' + err.message,
       printerName,
+      requestSocketId,
     });
   } finally {
     activeJobs.delete(fileId);
