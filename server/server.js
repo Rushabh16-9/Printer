@@ -111,8 +111,8 @@ app.post("/api/print-job", express.json(), async (req, res) => {
   const result = await new Promise((resolve) => {
     const timeout = setTimeout(() => {
       pendingJobs.delete(fileId);
-      resolve({ success: false, message: "Print agent timed out (60s). Check the agent is running." });
-    }, 60000);
+      resolve({ success: false, message: "Print agent timed out (5 min). Check the agent is running." });
+    }, 5 * 60 * 1000);
 
     // Save the resolve function so the socket can call it
     pendingJobs.set(fileId, (data) => {

@@ -145,12 +145,12 @@ function getSupportedFormats(printer) {
 }
 
 /**
- * Send one IPP Print-Job attempt with the given format.
- * Retries on server-error-busy (printer is processing a previous job).
- * Resolves with the format used on success.
+ * Submit one Print-Job to the printer.
+ * Retries on server-error-busy (printer busy with previous job).
+ * Returns { docFormat, jobId } on acceptance.
  */
-function ippPrint(printer, data, name, docFormat, copies, isColor, _retries) {
-  const retriesLeft = (_retries === undefined) ? 4 : _retries;
+function ippSubmitJob(printer, data, name, docFormat, copies, isColor, retriesLeft) {
+  if (retriesLeft === undefined) retriesLeft = 10;
   return new Promise((resolve, reject) => {
     printer.execute('Print-Job', {
       'operation-attributes-tag': {
@@ -166,27 +166,83 @@ function ippPrint(printer, data, name, docFormat, copies, isColor, _retries) {
     }, (err, res) => {
       if (err) return reject(new Error('IPP error: ' + err.message));
       const code = res && res.statusCode;
-      if (code && code === 'server-error-busy') {
+      if (code === 'server-error-busy') {
         if (retriesLeft > 0) {
-          // Printer busy — wait 2s and retry
-          log('   Printer busy, retrying in 2s... (' + retriesLeft + ' left)');
+          log('   Printer busy — retrying in 3s (' + retriesLeft + ' left)...');
           setTimeout(() => {
-            ippPrint(printer, data, name, docFormat, copies, isColor, retriesLeft - 1)
+            ippSubmitJob(printer, data, name, docFormat, copies, isColor, retriesLeft - 1)
               .then(resolve).catch(reject);
-          }, 2000);
+          }, 3000);
         } else {
-          // Still busy after all retries — printer queues it anyway, treat as success
-          log('   Printer busy but job is queued — will print shortly.');
-          resolve(docFormat);
+          reject(new Error('Printer stayed busy after all retries. Try again in a moment.'));
         }
         return;
       }
       if (code && !code.startsWith('successful'))
         return reject(new Error(code));
-      resolve(docFormat);
+      const jobAttrs = res && res['job-attributes-tag'];
+      const jobId = jobAttrs && jobAttrs['job-id'];
+      resolve({ docFormat, jobId });
     });
   });
 }
+
+/**
+ * Poll Get-Job-Attributes until the job reaches a terminal state.
+ * job-state values: 3=pending 4=pending-held 5=processing 6=processing-stopped
+ *                   7=canceled 8=aborted 9=completed
+ */
+function waitForJobCompletion(printer, jobId) {
+  const MAX_MS   = 5 * 60 * 1000; // 5 min max
+  const POLL_MS  = 2500;
+  const start    = Date.now();
+  return new Promise((resolve, reject) => {
+    function poll() {
+      if (Date.now() - start > MAX_MS)
+        return reject(new Error('Timed out waiting for print job to finish'));
+      printer.execute('Get-Job-Attributes', {
+        'operation-attributes-tag': {
+          'requesting-user-name': 'PrintScan',
+          'job-id': jobId,
+          'requested-attributes': ['job-state', 'job-state-reasons'],
+        },
+      }, (err, res) => {
+        if (err) {
+          // Can't query status — assume still printing, keep polling
+          return setTimeout(poll, POLL_MS);
+        }
+        const attrs   = res && res['job-attributes-tag'];
+        const state   = attrs && attrs['job-state'];
+        const reasons = (attrs && attrs['job-state-reasons']) || '';
+        if (state === 9)  return resolve();                                        // completed ✅
+        if (state === 7)  return reject(new Error('Print job canceled by printer'));
+        if (state === 8)  return reject(new Error('Print job aborted: ' + reasons));
+        log('   Job #' + jobId + ' state=' + (state || '?') + ' — waiting...');
+        setTimeout(poll, POLL_MS);
+      });
+    }
+    poll();
+  });
+}
+
+/**
+ * Submit a print job and wait until it is truly completed on the printer.
+ * Reports success only after all pages have physically printed.
+ */
+async function ippPrint(printer, data, name, docFormat, copies, isColor) {
+  const { jobId } = await ippSubmitJob(printer, data, name, docFormat, copies, isColor);
+  if (jobId) {
+    log('   Job #' + jobId + ' accepted — waiting for completion...');
+    await waitForJobCompletion(printer, jobId);
+    log('   Job #' + jobId + ' completed successfully.');
+  } else {
+    // Printer didn't return a job-id (rare) — wait fixed time
+    log('   Job accepted (no job-id). Waiting 8s for printer...');
+    await new Promise(r => setTimeout(r, 8000));
+  }
+  return docFormat;
+}
+
 
 async function printWifi(buf, name, copies, isColor) {
   if (!PRINTER_URL) throw new Error('PRINTER_URL not set in .env');
